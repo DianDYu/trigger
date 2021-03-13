@@ -115,6 +115,7 @@ def generate_prompt(
     discrim=None,
     class_label=None,
     trigger_format="token",
+    not_mask_trigger=False,
     length=100,
     temperature=1.0,
     top_k=10,
@@ -268,7 +269,7 @@ def generate_prompt(
         for r_i in range(length):
             # TODO: mask trigger key and value
 
-            if num_of_triggers > 0:
+            if num_of_triggers > 0 and not not_mask_trigger:
                 # create attention mask
                 past_length = past[0][0].shape[-2]
                 attention_mask = torch.ones(1, past_length + 1)  # add current 1 to length (also, bze=1)
@@ -276,8 +277,6 @@ def generate_prompt(
                 attention_mask = attention_mask.to(device)
             else:
                 attention_mask = None
-
-            attention_mask = None
 
             # lm_rep_output = model(last, past_key_values=past, attention_mask=attention_mask)
             # debugging
@@ -393,6 +392,7 @@ def run_prompt_trigger_example(
     num_samples=1,
     num_of_triggers=1,
     trigger_format="token",
+    not_mask_trigger=False,
     learning_rate=5e-5,
     adam_epsilon=1e-8,
     discrim=None,
@@ -441,7 +441,8 @@ def run_prompt_trigger_example(
     
     generate_prompt(model, tokenizer, num_of_triggers, learning_rate=learning_rate, adam_epsilon=adam_epsilon,
                     context=tokenized_cond_text, device=device, discrim=discrim, class_label=class_label,
-                    trigger_format=trigger_format, length=length, temperature=temperature, top_k=top_k, sample=sample,
+                    trigger_format=trigger_format, not_mask_trigger=not_mask_trigger, length=length, 
+                    temperature=temperature, top_k=top_k, sample=sample,
                     num_iterations=num_iterations, repetition_penalty=repetition_penalty)
 
 
@@ -483,6 +484,8 @@ if __name__ == "__main__":
         choices=("token", "key_value"),
         help="trigger format to use",
     )
+    parser.add_argument("--not_mask_trigger", action="store_true", help="whether to mask the trigger(s) for response generation")
+
     parser.add_argument("--length", type=int, default=100)
     parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument("--adam_epsilon", type=float, default=1e-8)
