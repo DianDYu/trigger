@@ -154,19 +154,27 @@ def generate_prompt(
                     trigger_i_key.requires_grad = True
                     trigger_i_value.requires_grad = True
 
-                    # register parameter into optimizer
-                    key_name = "l_%d_key_%d" % (layer, i_t)
-                    value_name = "l_%d_value_%d" % (layer, i_t)
-                    model.register_parameter(name=key_name, param=trigger_i_key)
-                    model.register_parameter(name=value_name, param=trigger_i_value)
-
                     if trigger_key_values[layer][0] is None:
                         trigger_key_values[layer] = (trigger_i_key, trigger_i_value)
                     else:
                         # if multiple triggers
-                        trigger_key = torch.cat((trigger_key_values[layer][0], trigger_i_key), dim=-2)
-                        trigger_value = torch.cat((trigger_key_values[layer][1], trigger_i_value), dim=-2)
+                        trigger_key = nn.Parameter(torch.cat((trigger_key_values[layer][0], trigger_i_key), dim=-2))
+                        trigger_value = nn.Parameter(torch.cat((trigger_key_values[layer][1], trigger_i_value), dim=-2))
                         trigger_key_values[layer] = (trigger_key, trigger_value)
+
+                        # trigger_key.requires_grad = True
+                        # trigger_value.requires_grad = True
+
+                # register parameter into optimizer
+                key_name = "l_%d_key" % layer
+                value_name = "l_%d_value" % layer
+                if num_of_triggers == 1:
+                    model.register_parameter(name=key_name, param=trigger_i_key)
+                    model.register_parameter(name=value_name, param=trigger_i_value)
+                else:
+                    model.register_parameter(name=key_name, param=trigger_key)
+                    model.register_parameter(name=value_name, param=trigger_value)
+
             trigger_key_values = tuple(trigger_key_values)
         else:
             assert False, "trigger_format: %s not supported" % trigger_format
@@ -373,8 +381,9 @@ def generate_prompt(
             #     print("trigger_key_value_grad")
             #     # print(model.l_12_key_0.grad.shape)
             #     # print(model.l_12_key_0.grad)
-            #     print(model.l_12_value_0.grad.shape)
-            #     print(model.l_12_value_0.grad)
+            #     print(model.l_12_value.grad.shape)
+            #     # print(model.l_12_value_1.grad)
+            #     print(model.l_12_value)
 
             optimizer.step()
 
