@@ -144,22 +144,29 @@ def generate_prompt(
             bos_key_values = model(torch.tensor(tokenizer.encode(tokenizer.bos_token), dtype=torch.long).unsqueeze(0).to(device))[
                             "past_key_values"]
             for layer in range(num_layers):
-                for _ in range(num_of_triggers):
+                for i_t in range(num_of_triggers):
                     trigger_i_key_value = copy.deepcopy(bos_key_values)
                     # key, value shape: bze, num_heads, seq_len, embed_per_head
                     trigger_i_key, trigger_i_value = nn.Parameter(trigger_i_key_value[layer][0]), \
                                                      nn.Parameter(trigger_i_key_value[layer][1])
+
                     trigger_i_key.requires_grad = True
                     trigger_i_value.requires_grad = True
+
+                    # register parameter into optimizer
+                    key_name = "l_%d_key_%d" % (layer, i_t)
+                    value_name = "l_%d_value_%d" % (layer, i_t)
+                    model.register_parameter(name=key_name, param=trigger_i_key)
+                    model.register_parameter(name=value_name, param=trigger_i_value)
+
                     if trigger_key_values[layer][0] is None:
                         trigger_key_values[layer] = (trigger_i_key, trigger_i_value)
                     else:
+                        # if multiple triggers
                         trigger_key = torch.cat((trigger_key_values[layer][0], trigger_i_key), dim=-2)
                         trigger_value = torch.cat((trigger_key_values[layer][1], trigger_i_value), dim=-2)
                         trigger_key_values[layer] = (trigger_key, trigger_value)
             trigger_key_values = tuple(trigger_key_values)
-            model.trigger_key_values = trigger_key_values
-            model.trigger_key_values.requires_grad = True
         else:
             assert False, "trigger_format: %s not supported" % trigger_format
 
@@ -174,7 +181,13 @@ def generate_prompt(
 
     # debugging
     print("optimizing params: ")
-    print(param_optimizer)
+    # print(param_optimizer)
+    # get all names
+    optimizing_names = []
+    for p_o in param_optimizer:
+        optimizing_names.append(p_o[0])
+    print(optimizing_names)
+
 
     no_decay = ['bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [
@@ -349,13 +362,20 @@ def generate_prompt(
             # compute gradients
             discrim_loss.backward()
 
-            # debugging: check grad
-            print("token grad")
-            print(trigger_embedding.grad)
-
-            # # debugging
-            # print("original trigger embedding")
-            # print(trigger_embedding)
+            # # debugging: check grad
+            # if trigger_format == "token":
+            #     print("token grad")
+            #     print(trigger_embedding.grad)
+            #
+            #     # # debugging
+            #     # print("original trigger embedding")
+            #     # print(trigger_embedding)
+            # else:
+            #     print("trigger_key_value_grad")
+            #     # print(model.l_12_key_0.grad.shape)
+            #     # print(model.l_12_key_0.grad)
+            #     print(model.l_12_value_0.grad.shape)
+            #     print(model.l_12_value_0.grad)
 
             optimizer.step()
 
