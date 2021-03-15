@@ -226,6 +226,8 @@ def generate_prompt(
             # print("bos + trigger past key value")
             # print(past[-1][0][0, 0, :, :20])
             # print(past[-1][1][0, 0, :, :20])
+        else:
+            trigger_key_values = past
 
         output_so_far = context_t
 
