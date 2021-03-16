@@ -17,6 +17,8 @@ from transformers import AdamW, get_linear_schedule_with_warmup
 from train_classifier_head import ClassificationHead
 
 
+TRIGGER_POSITION_ID = 0  # 0 or 1
+
 DISCRIMINATOR_MODELS_PARAMS = {
     "clickbait": {
         "url": "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/discriminators/clickbait_classifier_head.pt",
@@ -122,6 +124,9 @@ def generate_prompt(
     sample=False,
     num_iterations=10,
     repetition_penalty=1.0,
+    reset_pos_emb=False,
+    gumbel_softmax=False,
+    gumbel_temperature=1.0,
 ):
     classifier, class_id = get_classifier(discrim, class_label, device)
     
@@ -219,7 +224,13 @@ def generate_prompt(
         # print(past[-1][1][0, 0, :, :20])
         if num_of_triggers > 0:
             if trigger_format == "token":
-                lm_trigger_output = model(inputs_embeds=trigger_embedding, past_key_values=past)
+                if reset_pos_emb:
+                    t_position_ids = torch.arange(TRIGGER_POSITION_ID, TRIGGER_POSITION_ID + 1, dtype=torch.long,
+                                            device=device)
+                    t_position_ids = t_position_ids.unsqueeze(0)
+                else:
+                    t_position_ids = None
+                lm_trigger_output = model(inputs_embeds=trigger_embedding, past_key_values=past, position_ids=t_position_ids)
                 trigger_key_values = lm_trigger_output["past_key_values"]
             # past = concat_past(past, trigger_key_values, num_layers)
 
@@ -231,16 +242,33 @@ def generate_prompt(
 
         output_so_far = context_t
 
-        context_lm_output = model(context_t[:, 1:-1], past_key_values=trigger_key_values)
+
+        if reset_pos_emb:
+            c_position_ids = torch.arange(1, 1 + context_t[:, 1:-1].shape[-1], dtype=torch.long, device=device)
+            c_position_ids = c_position_ids.unsqueeze(0)
+        else:
+            c_position_ids = None
+        context_lm_output = model(context_t[:, 1:-1], past_key_values=trigger_key_values, position_ids=c_position_ids)
         past = context_lm_output["past_key_values"]
         last = output_so_far[:, -1:]
 
         optimizer.zero_grad()
 
+        gumbel_vector = None
+
         # generate conditional prompt
         print("=====Iteration: %d=====" % (i + 1))
         for p_i in range(length):
-            lm_output = model(last, past_key_values=past)
+            if reset_pos_emb:
+                past_length = past[0][0].size(-2)
+                p_position_ids = torch.arange(past_length - 1, past_length, dtype=torch.long, device=device)
+            else:
+                p_position_ids = None
+            if gumbel_softmax and gumbel_vector is not None:
+                last_emb = torch.mm(gumbel_vector, model.transformer.wte.weight).unsqueeze(0)  # needs to be bze, n, emb
+                lm_output = model(inputs_embeds=last_emb, past_key_values=past, position_ids=p_position_ids)
+            else:
+                lm_output = model(last, past_key_values=past, position_ids=p_position_ids)
             logits, past, all_hidden = (
                 lm_output["logits"],  # bze, cur_seq_len, vocab_size
                 lm_output["past_key_values"],  # acc_seq_len
@@ -257,7 +285,11 @@ def generate_prompt(
 
             probs = F.softmax(logits, dim=-1)
             if sample:
-                last = torch.multinomial(probs, num_samples=1)
+                if gumbel_softmax:  # note: it's a one-hot vector now
+                    gumbel_vector = F.gumbel_softmax(logits, tau=gumbel_temperature, hard=True)
+                    last = torch.argmax(gumbel_vector, dim=-1).unsqueeze(0)  # shape: 1, 1
+                else:
+                    last = torch.multinomial(probs, num_samples=1)
             else:
                 _, last = torch.topk(probs, k=1, dim=-1)
 
@@ -289,8 +321,21 @@ def generate_prompt(
                 attention_mask = None
 
             # lm_rep_output = model(last, past_key_values=past, attention_mask=attention_mask)
+
+            if reset_pos_emb:
+                past_length = past[0][0].size(-2)
+                r_position_ids = torch.arange(past_length - 1, past_length, dtype=torch.long, device=device)
+            else:
+                r_position_ids = None
+
             # debugging
-            lm_rep_output = model(last, past_key_values=past, attention_mask=attention_mask, output_attentions=True)
+            if gumbel_softmax:
+                last_emb = torch.mm(gumbel_vector, model.transformer.wte.weight).unsqueeze(0)
+                lm_rep_output = model(inputs_embeds=last_emb, past_key_values=past, attention_mask=attention_mask,
+                                  output_attentions=True, position_ids=r_position_ids)
+            else:
+                lm_rep_output = model(last, past_key_values=past, attention_mask=attention_mask, output_attentions=True,
+                                  position_ids=r_position_ids)
 
             rep_logits, past, rep_all_hidden = (
                 lm_rep_output["logits"],  # bze, cur_seq_len, vocab_size
@@ -300,7 +345,6 @@ def generate_prompt(
 
             rep_logits = rep_logits[:, -1, :] / temperature
             rep_logits = top_k_logits(rep_logits, top_k)
-            rep_logits = F.softmax(rep_logits, dim=-1)
 
             if response_so_far is not None:
                 everything_so_far = output_so_far[0].tolist() + response_so_far[0].tolist()
@@ -313,10 +357,16 @@ def generate_prompt(
                 else:
                     rep_logits[0, token_idx] /= repetition_penalty
 
+            rep_probs = F.softmax(rep_logits, dim=-1)
+
             if sample:
-                last = torch.multinomial(rep_logits, num_samples=1)
+                if gumbel_softmax:
+                    gumbel_vector = F.gumbel_softmax(rep_logits, tau=gumbel_temperature, hard=True)
+                    last = torch.argmax(gumbel_vector, dim=-1).unsqueeze(0)
+                else:
+                    last = torch.multinomial(rep_probs, num_samples=1)
             else:
-                _, last = torch.topk(rep_logits, k=1, dim=-1)
+                _, last = torch.topk(rep_probs, k=1, dim=-1)
 
             last_hidden = rep_all_hidden[-1]
 
@@ -416,6 +466,9 @@ def run_prompt_trigger_example(
     seed=0,
     no_cuda=False,
     repetition_penalty=1.0,
+    reset_pos_emb=False,
+    gumbel_softmax=False,
+    gumbel_temperature=1.0,
 ):
     # set Random seed
     torch.manual_seed(seed)
@@ -449,12 +502,18 @@ def run_prompt_trigger_example(
     print("= Prefix of sentence =")
     print(tokenizer.decode(tokenized_cond_text))
     print()
+
+    if reset_pos_emb and num_of_triggers > 1:
+        assert False, "num of trigger must be 1 if reset_pos_emb"
     
     generate_prompt(model, tokenizer, num_of_triggers, learning_rate=learning_rate, adam_epsilon=adam_epsilon,
                     context=tokenized_cond_text, device=device, discrim=discrim, class_label=class_label,
                     trigger_format=trigger_format, not_mask_trigger=not_mask_trigger, length=length, 
                     temperature=temperature, top_k=top_k, sample=sample,
-                    num_iterations=num_iterations, repetition_penalty=repetition_penalty)
+                    num_iterations=num_iterations, repetition_penalty=repetition_penalty,
+                    # experimental
+                    reset_pos_emb=reset_pos_emb, gumbel_softmax=gumbel_softmax, gumbel_temperature=gumbel_temperature,
+                    )
 
 
 if __name__ == "__main__":
@@ -496,6 +555,10 @@ if __name__ == "__main__":
         help="trigger format to use",
     )
     parser.add_argument("--not_mask_trigger", action="store_true", help="whether to mask the trigger(s) for response generation")
+    parser.add_argument("--reset_pos_emb", action="store_true", help="If True, then set position index of the trigger to be TRIGGER_POSITION_ID")
+    parser.add_argument("--gumbel_softmax", action="store_true", help="If True, use gumbel softmax instead of argmax in sampling which will make it differentiable")
+    parser.add_argument("--gumbel_temperature", type=float, default=1.0)
+
 
     parser.add_argument("--length", type=int, default=100)
     parser.add_argument("--learning_rate", type=float, default=5e-5)
