@@ -127,6 +127,7 @@ def generate_prompt(
     reset_pos_emb=False,
     gumbel_softmax=False,
     gumbel_temperature=1.0,
+    detach=False,
 ):
     classifier, class_id = get_classifier(discrim, class_label, device)
     
@@ -255,6 +256,8 @@ def generate_prompt(
         optimizer.zero_grad()
 
         gumbel_vector = None
+        if detach:
+            all_gumbel_vectors = []
 
         # generate conditional prompt
         print("=====Iteration: %d=====" % (i + 1))
@@ -288,6 +291,8 @@ def generate_prompt(
                 if gumbel_softmax:  # note: it's a one-hot vector now
                     gumbel_vector = F.gumbel_softmax(logits, tau=gumbel_temperature, hard=True)
                     last = torch.argmax(gumbel_vector, dim=-1).unsqueeze(0)  # shape: 1, 1
+                    if detach:
+                        all_gumbel_vectors.append(gumbel_vector)
                 else:
                     last = torch.multinomial(probs, num_samples=1)
             else:
@@ -302,6 +307,14 @@ def generate_prompt(
         # print(output_so_far.tolist())
         print(tokenizer.decode(output_so_far.tolist()[0]))
         print("***" * 20)
+        
+        if detach:
+            detach_context_output = model(context_t)
+            past = detach_context_output["past_key_values"]
+            for last_detach_vector in all_gumbel_vectors:
+                last_detach_emb = torch.mm(last_detach_vector, model.transformer.wte.weight).unsqueeze(0)
+                last_detach_output = model(inputs_embeds=last_detach_emb, past_key_values=past)
+                past = last_detach_output["past_key_values"]
 
         # generate response
         response_hidden = []
@@ -422,13 +435,13 @@ def generate_prompt(
             discrim_loss.backward()
 
             # # debugging: check grad
-            # if trigger_format == "token":
-            #     print("token grad")
-            #     print(trigger_embedding.grad)
+            if trigger_format == "token":
+                print("token grad")
+                print(trigger_embedding.grad)
             #
-            #     # # debugging
-            #     # print("original trigger embedding")
-            #     # print(trigger_embedding)
+                # debugging
+                print("original trigger embedding")
+                print(trigger_embedding)
             # else:
             #     print("trigger_key_value_grad")
             #     # print(model.l_12_key_0.grad.shape)
@@ -469,6 +482,7 @@ def run_prompt_trigger_example(
     reset_pos_emb=False,
     gumbel_softmax=False,
     gumbel_temperature=1.0,
+    detach=False,
 ):
     # set Random seed
     torch.manual_seed(seed)
@@ -505,6 +519,9 @@ def run_prompt_trigger_example(
 
     if reset_pos_emb and num_of_triggers > 1:
         assert False, "num of trigger must be 1 if reset_pos_emb"
+
+    if detach and not gumbel_softmax:
+        assert False, "require gumbel softmax when using detach"
     
     generate_prompt(model, tokenizer, num_of_triggers, learning_rate=learning_rate, adam_epsilon=adam_epsilon,
                     context=tokenized_cond_text, device=device, discrim=discrim, class_label=class_label,
@@ -513,6 +530,7 @@ def run_prompt_trigger_example(
                     num_iterations=num_iterations, repetition_penalty=repetition_penalty,
                     # experimental
                     reset_pos_emb=reset_pos_emb, gumbel_softmax=gumbel_softmax, gumbel_temperature=gumbel_temperature,
+                    detach=detach,
                     )
 
 
@@ -558,7 +576,7 @@ if __name__ == "__main__":
     parser.add_argument("--reset_pos_emb", action="store_true", help="If True, then set position index of the trigger to be TRIGGER_POSITION_ID")
     parser.add_argument("--gumbel_softmax", action="store_true", help="If True, use gumbel softmax instead of argmax in sampling which will make it differentiable")
     parser.add_argument("--gumbel_temperature", type=float, default=1.0)
-
+    parser.add_argument("--detach", action="store_true", help="If True, remove trigger when generating responses. It requires using gumbel softmax")
 
     parser.add_argument("--length", type=int, default=100)
     parser.add_argument("--learning_rate", type=float, default=5e-5)
