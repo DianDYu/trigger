@@ -12,7 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Finetuning the library models for sequence classification on GLUE."""
+""" Finetuning the library models for sequence classification on GLUE.
+
+CUDA_VISIBLE_DEVICES=1 python run_classifier.py --model_name_or_path DeepPavlov/bert-base-cased-conversational --do_train --do_eval --max_seq_length 128 --per_device_train_batch_size 64 --learning_rate 2e-5 --num_train_epochs 3 --output_dir /mnt/dian/trigger_experiments/bertconv_bbf_bad_ctx --train_file data/bbf_bad_train.csv --validation_file data/bad_valid.csv --use_context
+
+
+
+"""
+
 # You can also adapt this script on your own text classification task. Pointers for this are left as comments.
 
 import logging
@@ -269,6 +276,10 @@ def main():
             label_list.sort()  # Let's sort it for determinism
             num_labels = len(label_list)
 
+    print("========labels=========")
+    print(label_list)
+    print()
+
     # Load pretrained model and tokenizer
     #
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
@@ -327,13 +338,15 @@ def main():
         #     else:
         #         sentence1_key, sentence2_key = non_label_column_names[0], None
         if model_args.use_context:
-            if model_args.speaker == "bot":
-                sentence1_key, sentence2_key = "bot_context", "bot_utterance"
-            elif model_args.speaker == "human":
-                sentence1_key, sentence2_key = "human_context", "human_utterance"
-            else:
-                assert False, "speaker %s not supported" % model_args.speaker
+            # if model_args.speaker == "bot":
+            #     sentence1_key, sentence2_key = "bot_context", "bot_utterance"
+            # elif model_args.speaker == "human":
+            #     sentence1_key, sentence2_key = "human_context", "human_utterance"
+            # else:
+            #     assert False, "speaker %s not supported" % model_args.speaker
+            sentence1_key, sentence2_key = "text", "context"
         else:
+            assert False, "not supported anymore"
             if model_args.speaker == "bot":
                 sentence1_key, sentence2_key = "bot_utterance", None
             elif model_args.speaker == "human":
@@ -496,8 +509,10 @@ def main():
             # Removing the `label` columns because it contains -1 and Trainer won't like that.
             test_dataset.remove_columns_("label")
             predictions = trainer.predict(test_dataset=test_dataset).predictions
+            # print(predictions)
             predictions = np.squeeze(predictions) if is_regression else np.argmax(predictions, axis=1)
-
+            # print(predictions)
+            # print()
             output_test_file = os.path.join(training_args.output_dir, f"test_results_{task}.txt")
             if trainer.is_world_process_zero():
                 with open(output_test_file, "w") as writer:

@@ -16,6 +16,8 @@ from transformers import AdamW, get_linear_schedule_with_warmup
 
 from train_classifier_head import ClassificationHead
 
+from utils import get_classifier, generate_next, concat_past
+
 
 """--pretrained_model gpt2-medium --cond_text "James Harden is not a good player." --discrim sentiment --class_label 2
  --num_of_triggers 1 --trigger_format key_value --num_iterations 40 --learning_rate 1e-2  --sample --gumbel_softmax 
@@ -52,54 +54,54 @@ DISCRIMINATOR_MODELS_PARAMS = {
 }
 
 
-def get_classifier(
-    name: Optional[str], class_label: Union[str, int], device: str
-) -> Tuple[Optional[ClassificationHead], Optional[int]]:
-    if name is None:
-        return None, None
-
-    params = DISCRIMINATOR_MODELS_PARAMS[name]
-    classifier = ClassificationHead(class_size=params["class_size"], embed_size=params["embed_size"]).to(device)
-    if "url" in params:
-        resolved_archive_file = cached_path(params["url"])
-    elif "path" in params:
-        resolved_archive_file = params["path"]
-    else:
-        raise ValueError("Either url or path have to be specified in the discriminator model parameters")
-    classifier.load_state_dict(torch.load(resolved_archive_file, map_location=device))
-    classifier.eval()
-
-    if isinstance(class_label, str):
-        if class_label in params["class_vocab"]:
-            label_id = params["class_vocab"][class_label]
-        else:
-            label_id = params["default_class"]
-            print("class_label {} not in class_vocab".format(class_label))
-            print("available values are: {}".format(params["class_vocab"]))
-            print("using default class {}".format(label_id))
-
-    elif isinstance(class_label, int):
-        if class_label in set(params["class_vocab"].values()):
-            label_id = class_label
-        else:
-            label_id = params["default_class"]
-            print("class_label {} not in class_vocab".format(class_label))
-            print("available values are: {}".format(params["class_vocab"]))
-            print("using default class {}".format(label_id))
-
-    else:
-        label_id = params["default_class"]
-
-    return classifier, label_id
-
-
-def concat_past(ori_past, new_past, num_layers):
-    concated_past = list()
-    for layer in range(num_layers):
-        l_concat_key = torch.cat((ori_past[layer][0], new_past[layer][0]), dim=-2)
-        l_concat_value = torch.cat((ori_past[layer][1], new_past[layer][1]), dim=-2)
-        concated_past.append((l_concat_key, l_concat_value))
-    return tuple(concated_past)
+# def get_classifier(
+#     name: Optional[str], class_label: Union[str, int], device: str
+# ) -> Tuple[Optional[ClassificationHead], Optional[int]]:
+#     if name is None:
+#         return None, None
+#
+#     params = DISCRIMINATOR_MODELS_PARAMS[name]
+#     classifier = ClassificationHead(class_size=params["class_size"], embed_size=params["embed_size"]).to(device)
+#     if "url" in params:
+#         resolved_archive_file = cached_path(params["url"])
+#     elif "path" in params:
+#         resolved_archive_file = params["path"]
+#     else:
+#         raise ValueError("Either url or path have to be specified in the discriminator model parameters")
+#     classifier.load_state_dict(torch.load(resolved_archive_file, map_location=device))
+#     classifier.eval()
+#
+#     if isinstance(class_label, str):
+#         if class_label in params["class_vocab"]:
+#             label_id = params["class_vocab"][class_label]
+#         else:
+#             label_id = params["default_class"]
+#             print("class_label {} not in class_vocab".format(class_label))
+#             print("available values are: {}".format(params["class_vocab"]))
+#             print("using default class {}".format(label_id))
+#
+#     elif isinstance(class_label, int):
+#         if class_label in set(params["class_vocab"].values()):
+#             label_id = class_label
+#         else:
+#             label_id = params["default_class"]
+#             print("class_label {} not in class_vocab".format(class_label))
+#             print("available values are: {}".format(params["class_vocab"]))
+#             print("using default class {}".format(label_id))
+#
+#     else:
+#         label_id = params["default_class"]
+#
+#     return classifier, label_id
+#
+#
+# def concat_past(ori_past, new_past, num_layers):
+#     concated_past = list()
+#     for layer in range(num_layers):
+#         l_concat_key = torch.cat((ori_past[layer][0], new_past[layer][0]), dim=-2)
+#         l_concat_value = torch.cat((ori_past[layer][1], new_past[layer][1]), dim=-2)
+#         concated_past.append((l_concat_key, l_concat_value))
+#     return tuple(concated_past)
 
 
 # Gets the score for the top-k logits to improve quality of samples.
@@ -143,6 +145,7 @@ def generate_prompt(
 
     num_layers = model.config.n_layer
 
+    # initialize trigger
     if num_of_triggers > 0:
         if trigger_format == "token":  # learn a continuous embedding
             trigger_embedding_list = []
@@ -152,11 +155,12 @@ def generate_prompt(
                 trigger_embedding_i.requires_grad = True
                 trigger_embedding_list.append(trigger_embedding_i)
             trigger_embedding = nn.Parameter(torch.cat(trigger_embedding_list, dim=1))  # bze x n x emb_size
-            model.trigger_embedding = trigger_embedding
+            model.trigger_embedding = trigger_embedding  # register to the model (optimizer)
         elif trigger_format == "key_value":  # learn key values
             trigger_key_values = [(None, None) for _ in range(num_layers)]
-            bos_key_values = model(torch.tensor(tokenizer.encode(tokenizer.bos_token), dtype=torch.long).unsqueeze(0).to(device))[
-                            "past_key_values"]
+            bos_key_values = \
+            model(torch.tensor(tokenizer.encode(tokenizer.bos_token), dtype=torch.long).unsqueeze(0).to(device))[
+                "past_key_values"]
             for layer in range(num_layers):
                 for i_t in range(num_of_triggers):
                     trigger_i_key_value = copy.deepcopy(bos_key_values)
@@ -226,41 +230,46 @@ def generate_prompt(
     
     model.zero_grad()
 
+    lm_bos_output = model(context_t[:, 0])  # BOS
+    past = lm_bos_output["past_key_values"]
+
     loss_per_update = 0
     total_loss = 0
 
     for i in range(num_iterations):
-        past = lm_bos_output["past_key_values"]
+
+        model.train()
+
         # print("bos past key value")
         # print(past[-1][0][0, 0, :, :20])
         # print(past[-1][1][0, 0, :, :20])
         if num_of_triggers > 0:
             if trigger_format == "token":
                 if reset_pos_emb:
-                    t_position_ids = torch.arange(TRIGGER_POSITION_ID, TRIGGER_POSITION_ID + 1, dtype=torch.long,
-                                            device=device)
-                    t_position_ids = t_position_ids.unsqueeze(0)
+                    t_position_ids = torch.ones(1, num_of_triggers).to(torch.long).to(device) * TRIGGER_POSITION_ID
                 else:
                     t_position_ids = None
-                lm_trigger_output = model(inputs_embeds=trigger_embedding, past_key_values=past, position_ids=t_position_ids)
+                #             lm_trigger_output = model(inputs_embeds=trigger_embedding, past_key_values=past, position_ids=t_position_ids)
+                lm_trigger_output = model(inputs_embeds=trigger_embedding, position_ids=t_position_ids)
                 trigger_key_values = lm_trigger_output["past_key_values"]
-            # past = concat_past(past, trigger_key_values, num_layers)
+            past = concat_past(past, trigger_key_values, num_layers)
 
             # print("bos + trigger past key value")
             # print(past[-1][0][0, 0, :, :20])
             # print(past[-1][1][0, 0, :, :20])
         else:
-            trigger_key_values = past
+            trigger_key_values = None
 
         output_so_far = context_t
 
+        # WARNING: [bos] is not considered for trigger_key_values now
 
         if reset_pos_emb:
             c_position_ids = torch.arange(1, 1 + context_t[:, 1:-1].shape[-1], dtype=torch.long, device=device)
             c_position_ids = c_position_ids.unsqueeze(0)
         else:
             c_position_ids = None
-        context_lm_output = model(context_t[:, 1:-1], past_key_values=trigger_key_values, position_ids=c_position_ids)
+        context_lm_output = model(context_t[:, 1:-1], past_key_values=past, position_ids=c_position_ids)
         past = context_lm_output["past_key_values"]
         last = output_so_far[:, -1:]
 
@@ -275,7 +284,8 @@ def generate_prompt(
         for p_i in range(length):
             if reset_pos_emb:
                 past_length = past[0][0].size(-2)
-                p_position_ids = torch.arange(past_length - 1, past_length, dtype=torch.long, device=device)
+                p_position_ids = torch.arange(past_length - num_of_triggers, past_length - num_of_triggers + 1,
+                                              dtype=torch.long, device=device)
             else:
                 p_position_ids = None
             if gumbel_softmax and gumbel_vector is not None:
@@ -288,26 +298,13 @@ def generate_prompt(
                 lm_output["past_key_values"],  # acc_seq_len
                 lm_output["hidden_states"],  # num_layers + 1, tuple of (bze, cur_seq_len, hid_sze)
             )
-            logits = logits[:, -1, :] / temperature
-            logits = top_k_logits(logits, top_k)
 
-            for token_idx in set(output_so_far[0].tolist()):
-                if logits[0, token_idx] < 0:
-                    logits[0, token_idx] *= repetition_penalty
-                else:
-                    logits[0, token_idx] /= repetition_penalty
-
-            probs = F.softmax(logits, dim=-1)
-            if sample:
-                if gumbel_softmax:  # note: it's a one-hot vector now
-                    gumbel_vector = F.gumbel_softmax(logits, tau=gumbel_temperature, hard=True)
-                    last = torch.argmax(gumbel_vector, dim=-1).unsqueeze(0)  # shape: 1, 1
-                    if detach:
-                        all_gumbel_vectors.append(gumbel_vector)
-                else:
-                    last = torch.multinomial(probs, num_samples=1)
-            else:
-                _, last = torch.topk(probs, k=1, dim=-1)
+            last, gumbel_vector = generate_next(logits, output_so_far, top_k=top_k, temperature=temperature,
+                                                repetition_penalty=repetition_penalty, sample=sample,
+                                                gumbel_softmax=gumbel_softmax, gumbel_temperature=gumbel_temperature,
+                                                detach=detach)
+            if detach:
+                all_gumbel_vectors.append(gumbel_vector)
 
             output_so_far = torch.cat((output_so_far, last), dim=1)
 
@@ -318,11 +315,11 @@ def generate_prompt(
         # print(output_so_far.tolist())
         print(tokenizer.decode(output_so_far.tolist()[0]))
         print("***" * 20)
-        
+
         if detach:
-            detach_context_output = model(context_t)
+            detach_context_output = model(context_t)  # Note: context + prompt here will not attend to the trigger(s)
             past = detach_context_output["past_key_values"]
-            for last_detach_vector in all_gumbel_vectors:
+            for last_detach_vector in all_gumbel_vectors[:-1]:  # the last gumbel vector is "."
                 last_detach_emb = torch.mm(last_detach_vector, model.transformer.wte.weight).unsqueeze(0)
                 last_detach_output = model(inputs_embeds=last_detach_emb, past_key_values=past)
                 past = last_detach_output["past_key_values"]
@@ -335,7 +332,7 @@ def generate_prompt(
         for r_i in range(length):
             # TODO: mask trigger key and value
 
-            if num_of_triggers > 0 and not not_mask_trigger:
+            if num_of_triggers > 0 and not not_mask_trigger and not detach:
                 # create attention mask
                 past_length = past[0][0].shape[-2]
                 attention_mask = torch.ones(1, past_length + 1)  # add current 1 to length (also, bze=1)
@@ -346,9 +343,10 @@ def generate_prompt(
 
             # lm_rep_output = model(last, past_key_values=past, attention_mask=attention_mask)
 
-            if reset_pos_emb:
+            if reset_pos_emb and not detach:
                 past_length = past[0][0].size(-2)
-                r_position_ids = torch.arange(past_length - 1, past_length, dtype=torch.long, device=device)
+                r_position_ids = torch.arange(past_length - num_of_triggers, past_length - num_of_triggers + 1,
+                                              dtype=torch.long, device=device)
             else:
                 r_position_ids = None
 
@@ -356,10 +354,10 @@ def generate_prompt(
             if gumbel_softmax:
                 last_emb = torch.mm(gumbel_vector, model.transformer.wte.weight).unsqueeze(0)
                 lm_rep_output = model(inputs_embeds=last_emb, past_key_values=past, attention_mask=attention_mask,
-                                  output_attentions=True, position_ids=r_position_ids)
+                                      output_attentions=True, position_ids=r_position_ids)
             else:
                 lm_rep_output = model(last, past_key_values=past, attention_mask=attention_mask, output_attentions=True,
-                                  position_ids=r_position_ids)
+                                      position_ids=r_position_ids)
 
             rep_logits, past, rep_all_hidden = (
                 lm_rep_output["logits"],  # bze, cur_seq_len, vocab_size
@@ -367,30 +365,15 @@ def generate_prompt(
                 lm_rep_output["hidden_states"],  # num_layers + 1, tuple of (bze, cur_seq_len, hid_sze)
             )
 
-            rep_logits = rep_logits[:, -1, :] / temperature
-            rep_logits = top_k_logits(rep_logits, top_k)
-
             if response_so_far is not None:
                 everything_so_far = output_so_far[0].tolist() + response_so_far[0].tolist()
             else:
                 everything_so_far = output_so_far[0].tolist()
 
-            for token_idx in set(everything_so_far):
-                if rep_logits[0, token_idx] < 0:
-                    rep_logits[0, token_idx] *= repetition_penalty
-                else:
-                    rep_logits[0, token_idx] /= repetition_penalty
-
-            rep_probs = F.softmax(rep_logits, dim=-1)
-
-            if sample:
-                if gumbel_softmax:
-                    gumbel_vector = F.gumbel_softmax(rep_logits, tau=gumbel_temperature, hard=True)
-                    last = torch.argmax(gumbel_vector, dim=-1).unsqueeze(0)
-                else:
-                    last = torch.multinomial(rep_probs, num_samples=1)
-            else:
-                _, last = torch.topk(rep_probs, k=1, dim=-1)
+            last, gumbel_vector = generate_next(rep_logits, everything_so_far, top_k=top_k, temperature=temperature,
+                                                repetition_penalty=repetition_penalty, sample=sample,
+                                                gumbel_softmax=gumbel_softmax, gumbel_temperature=gumbel_temperature,
+                                                detach=detach)
 
             last_hidden = rep_all_hidden[-1]
 
@@ -434,8 +417,6 @@ def generate_prompt(
         # print("layer 0")
         # print(past[0][0][0][0, :, :5])
 
-
-
         # debugging
         # print("prediction: ")
         # print(prediction)
@@ -449,9 +430,9 @@ def generate_prompt(
             # # debugging: check grad
             if trigger_format == "token":
                 print("token grad")
-                # print(trigger_embedding.grad)
-                print(trigger_embedding)
-            #
+                print(trigger_embedding.grad)
+                #             print(trigger_embedding)
+                #
                 # debugging
                 print("original trigger embedding")
                 print(trigger_embedding)
@@ -543,6 +524,35 @@ def run_prompt_trigger_example(
 
     if detach and not gumbel_softmax:
         assert False, "require gumbel softmax when using detach"
+
+    seed = 0
+    device = "cuda"
+
+    pretrained_model = "gpt2-medium"
+    discrim = "sentiment"
+    class_label = 2
+    num_of_triggers = 2
+
+    trigger_format = "token"
+    TRIGGER_POSITION_ID = 0  # for position reset
+
+    num_iterations = 40
+    learning_rate = 1e-2
+    adam_epsilon = 1e-8
+
+    sample = True
+    gumbel_softmax = True
+    gumbel_temperature = 1.0
+    detach = True
+    gradient_accumulation_steps = 4
+    reset_pos_emb = True
+    not_mask_trigger = False
+
+    # more or less fixed for generation
+    top_k = 10
+    temperature = 1.0
+    repetition_penalty = 1.0
+    length = 40
     
     generate_prompt(model, tokenizer, num_of_triggers, learning_rate=learning_rate, adam_epsilon=adam_epsilon,
                     context=tokenized_cond_text, device=device, discrim=discrim, class_label=class_label,
