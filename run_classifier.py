@@ -14,7 +14,7 @@
 # limitations under the License.
 """ Finetuning the library models for sequence classification on GLUE.
 
-CUDA_VISIBLE_DEVICES=1 python run_classifier.py --model_name_or_path DeepPavlov/bert-base-cased-conversational --do_train --do_eval --max_seq_length 128 --per_device_train_batch_size 64 --learning_rate 2e-5 --num_train_epochs 3 --output_dir /mnt/dian/trigger_experiments/bertconv_bbf_bad_ctx --train_file data/bbf_bad_train.csv --validation_file data/bad_valid.csv --use_context
+CUDA_VISIBLE_DEVICES=1 python run_classifier.py --model_name_or_path DeepPavlov/bert-base-cased-conversational --do_train --do_eval --max_seq_length 128 --per_device_train_batch_size 64 --learning_rate 2e-5 --num_train_epochs 3 --output_dir /trigger_experiments/bertconv_bbf_bad_ctx --train_file data/bbf_bad_train.csv --validation_file data/bad_valid.csv --use_context
 
 
 

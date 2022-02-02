@@ -42,7 +42,7 @@ DISCRIMINATOR_MODELS_PARAMS = {
     #     "pretrained_model": "gpt2-medium",
     # },
     "sentiment": {
-        "path": "/home/dianyu/trigger/sst_head/SST_classifier_head_epoch_10.pt",
+        "path": "",
         "class_size": 5,
         "embed_size": 1024,
         "class_vocab": {"very_positive": 2, "very_negative": 3},

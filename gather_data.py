@@ -1,12 +1,6 @@
 import csv
 
 
-# safety (BAD dataset)
-train_path = "/home/dianyu/ParlAI/data/bot_adversarial_dialogue/dialogue_datasets/bot_adversarial_dialogue_datasets_with_persona/train.txt"
-dev_path = "/home/dianyu/ParlAI/data/bot_adversarial_dialogue/dialogue_datasets/bot_adversarial_dialogue_datasets_with_persona/valid.txt"
-test_path = "/home/dianyu/ParlAI/data/bot_adversarial_dialogue/dialogue_datasets/bot_adversarial_dialogue_datasets_with_persona/test.txt"
-
-
 def process_data(filename, out_file_name):
     csv_file = open(out_file_name, mode="w")
     fieldnames = ['human_utterance', 'bot_utterance', 'label', 'human_context', 'bot_context', 'persona']
